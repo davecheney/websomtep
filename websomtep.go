@@ -29,15 +29,26 @@ import (
 
 	"code.google.com/p/go-smtpd/smtpd"
 	"code.google.com/p/go.net/websocket"
+	"code.google.com/p/go.crypto/ssh"
 )
 
 var (
 	webListen  = flag.String("listen", ":8081", "address to listen for HTTP/WebSockets on")
 	smtpListen = flag.String("smtp", ":2500", "address to listen for SMTP on")
-	domain     = flag.String("domain", "websomtep.danga.com", "required domain name in RCPT lines")
-	wsAddr     = flag.String("ws", "websomtep.danga.com", "websocket host[:port], as seen by JavaScript")
+	domain     = flag.String("domain", "websomtep.cheney.net", "required domain name in RCPT lines")
+	wsAddr     = flag.String("ws", "websomtep.cheney.net", "websocket host[:port], as seen by JavaScript")
 	debug      = flag.Bool("debug", false, "enable debug features")
+	sshhost    = flag.String("ssh.host", "localhost", "ssh host")
+	sshuser    = flag.String("ssh.user", "", "ssh username")
+        sshpass    = flag.String("ssh.pass", "", "ssh password")
 )
+
+// password implements the ClientPassword interface
+type password string
+
+func (p password) Password(user string) (string, error) {
+        return string(p), nil
+}
 
 // Message implements smtpd.Envelope by streaming the message to all
 // connected websocket clients.
@@ -383,19 +394,37 @@ func (w *watchCloseConn) Close() error {
 func main() {
 	flag.Parse()
 
+	config := &ssh.ClientConfig{
+                User: *sshuser,
+                Auth: []ssh.ClientAuth{
+                        ssh.ClientAuthPassword(password(*sshpass)),
+                },
+        }
+        conn, err := ssh.Dial("tcp", *sshhost+":22", config)
+        if err != nil {
+                log.Fatalf("unable to connect: %s", err)
+        }
+
+	log.Println("connected to ssh server")
+        defer conn.Close()
+
 	http.HandleFunc("/", home)
 	if *debug {
 		http.HandleFunc("/resend", resend)
 	}
 	http.Handle("/stream", websocket.Handler(streamMail))
 
-	sln, err := net.Listen("tcp", *smtpListen)
+	sln, err := conn.Listen("tcp", *smtpListen)
 	if err != nil {
 		log.Fatalf("error listening for SMTP: %v", err)
 	}
 
+	hln, err := conn.Listen("tcp", *webListen)
+	if err != nil {
+		log.Fatalf("error listening for HTTP: %v", err)
+	}
 	log.Printf("websomtep listening for HTTP on %q and SMTP on %q\n", *webListen, *smtpListen)
-	go http.ListenAndServe(*webListen, nil)
+	go http.Serve(hln, nil)
 
 	s := &smtpd.Server{
 		OnNewMail: func(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
